@@ -5,18 +5,18 @@ from sklearn.metrics.pairwise import cosine_similarity
 from scipy.stats import zscore
 
 class Svdpp:
-    def __init__(self, K=10, steps=3, gamma=0.04, lambda_=0.15):
+    def __init__(self, K=10, steps=3, gamma=0.04, lambdas=0.15):
         self.K = K
         self.steps = steps
         self.gamma = gamma
-        self.lambda_ = lambda_
+        self.lambdas = lambdas
 
     def load_data(self, path='../Data/ml-1m/'):
         self.path = path
         movies_columns = ['movieId', 'title', 'genres']
-        self.movies_df = pd.read_csv(path + 'movies.dat', sep='::', names=movies_columns, engine='python', encoding='ISO-8859-1')
+        self.movies_df = pd.read_csv(path + 'movies.dat', sep='::', names=movies_columns, engine='python',encoding='ISO-8859-1')
         ratings_columns = ['userId', 'movieId', 'rating', 'timestamp']
-        self.ratings_df = pd.read_csv(path + 'ratings.dat', sep='::', names=ratings_columns, engine='python', encoding='ISO-8859-1')
+        self.ratings_df = pd.read_csv(path + 'ratings.dat', sep='::', names=ratings_columns, engine='python',encoding='ISO-8859-1')
 
         self.mu = self.ratings_df['rating'].mean()
         self.M, self.N = len(np.unique(self.ratings_df['userId'])), len(np.unique(self.ratings_df['movieId']))
@@ -43,14 +43,14 @@ class Svdpp:
                 e_ui = r_ui - pred_r_ui
 
                 # 更新偏置项和隐含因子矩阵
-                self.bu[uid] += self.gamma * (e_ui - self.lambda_ * self.bu[uid])
-                self.bi[iid] += self.gamma * (e_ui - self.lambda_ * self.bi[iid])
-                self.P[uid, :] += self.gamma * (e_ui * self.Q[iid, :] - self.lambda_ * self.P[uid, :])
-                self.Q[iid, :] += self.gamma * (e_ui * self.P[uid, :] - self.lambda_ * self.Q[iid, :])
+                self.bu[uid] += self.gamma * (e_ui - self.lambdas * self.bu[uid])
+                self.bi[iid] += self.gamma * (e_ui - self.lambdas * self.bi[iid])
+                self.P[uid, :] += self.gamma * (e_ui * self.Q[iid, :] - self.lambdas * self.P[uid, :])
+                self.Q[iid, :] += self.gamma * (e_ui * self.P[uid, :] - self.lambdas * self.Q[iid, :])
 
             self.gamma *= 0.9  # 学习率递减
 
-    def top_n_recommendations(self, user_id, n=None):
+    def get_recommendations(self, user_id, n=None):
         uid = self.user_dict[user_id]
         iid_list = self.item_dict.values()
 
@@ -66,22 +66,18 @@ class Svdpp:
         # 根据预测评分排序并取出前n部
         return result_df.sort_values(by='predicted_rating', ascending=False).iloc[:n, :]
 
-    def get_top_n_recommendations(self, user_id, n=None):
-        # 获取并返回包含电影标题的前n个推荐
-        recommendations_df = self.top_n_recommendations(user_id, n)
-        return recommendations_df
 
-class MovieRecommender:
+class ContentBased:
     def __init__(self):
         pass
 
     def load_data(self, path='../Data/ml-1m/'):
         self.path = path
         movies_columns = ['movieId', 'title', 'genres']
-        self.movies_df = pd.read_csv(path + 'movies.dat', sep='::', names=movies_columns, engine='python', encoding='ISO-8859-1')
+        self.movies_df = pd.read_csv(path + 'movies.dat', sep='::', names=movies_columns, engine='python',encoding='ISO-8859-1')
 
         ratings_columns = ['userId', 'movieId', 'rating', 'timestamp']
-        self.ratings_df = pd.read_csv(path + 'ratings.dat', sep='::', names=ratings_columns, engine='python', encoding='ISO-8859-1')
+        self.ratings_df = pd.read_csv(path + 'ratings.dat', sep='::', names=ratings_columns, engine='python',encoding='ISO-8859-1')
 
         self.movies_df['Year'] = self.movies_df['title'].str.extract(r'(d{4})')
         self.movies_df['title'] = self.movies_df['title'].str.replace(r'(d{4})', '').str.strip()
@@ -104,21 +100,21 @@ class MovieRecommender:
         cosine_similarities = cosine_similarity(user_profile, self.tfidf_matrix)
         predicted_scores = cosine_similarities.flatten()
         recommendations_df = self.movies_df.copy()
-        recommendations_df['predicted_rating'] = predicted_scores*5
+        recommendations_df['predicted_rating'] = predicted_scores * 5
         rated_movie_ids = self.ratings_df[self.ratings_df['userId'] == user_id]['movieId'].tolist()
         recommendations_df = recommendations_df[~recommendations_df['movieId'].isin(rated_movie_ids)]
-        self.top_n_recommendations_df = recommendations_df
+        self.top_recommendations_df = recommendations_df
 
-    def get_top_n_recommendations(self, user_id, n=None):
+    def get_recommendations(self, user_id, n=None):
         # 默认参数n被设为None，不再限制返回的推荐数量
-        if hasattr(self, 'top_n_recommendations_df'):
+        if hasattr(self, 'top_recommendations_df'):
             if n:
-                return self.top_n_recommendations_df.nlargest(n, 'predicted_rating')
+                return self.top_recommendations_df.nlargest(n, 'predicted_rating')
             else:
-                return self.top_n_recommendations_df
+                return self.top_recommendations_df
         else:
             self.generate_recommendations(user_id)
-            return self.top_n_recommendations_df
+            return self.top_recommendations_df
 
 
 class HybridRecommender:
@@ -128,23 +124,10 @@ class HybridRecommender:
         self.weight1 = weight1
         self.weight2 = weight2
 
-    # 定义一个正规化函数，将 z 分数转化为 0 到 5 的分数
-    def normalize_to_0_5(self, scores):
-        min_score = scores.min()
-        range_score = scores.max() - min_score
-
-        # 将所有的分数转换为 0-1
-        normalized_scores = (scores - min_score) / range_score
-
-        # 将所有的分数转换为 0-5
-        normalized_scores = normalized_scores * 5
-
-        return normalized_scores
-
     def predict(self, user_id):
         # 获取两个模型的推荐电影
-        predictions1 = self.model1.get_top_n_recommendations(user_id)
-        predictions2 = self.model2.get_top_n_recommendations(user_id)
+        predictions1 = self.model1.get_recommendations(user_id)
+        predictions2 = self.model2.get_recommendations(user_id)
 
         # 标记每个预测的来源
         predictions1['source'] = 'model1'
@@ -154,7 +137,7 @@ class HybridRecommender:
         combined = pd.concat([predictions1, predictions2])
 
         # 正规化评分，转化为z分数并调整到0-5范围
-        combined['predicted_rating'] = self.normalize_to_0_5(combined.groupby('source')['predicted_rating'].transform(zscore))
+        combined['predicted_rating'] = normalize_to_5(combined.groupby('source')['predicted_rating'].transform(zscore))
         combined['original_rating'] = combined['predicted_rating']
 
         # 计算有差异性的加权混合评分
@@ -172,9 +155,7 @@ class HybridRecommender:
         # 遍历每个电影的组
         final_recommendations = []
         for movie_id, group in grouped:
-            # 获取电影的标题
             title = group['title'].iloc[0]
-
             # 如果电影来自两个模型
             if len(group) > 1:
                 # 取平均值作为混合评分
@@ -198,35 +179,50 @@ class HybridRecommender:
         return final_recommendations_df.head(5)
 
 
+def normalize_to_5(scores):  # 定义一个正规化函数，将 z 分数转化为 0 到 5 的分数
+    min_score = scores.min()
+    range_score = scores.max() - min_score
+
+    # 将所有的分数转换为 0-1
+    normalized_scores = (scores - min_score) / range_score
+
+    # 将所有的分数转换为 0-5
+    normalized_scores = normalized_scores * 5
+
+    return normalized_scores
+
+
 if __name__ == "__main__":
-    # 创建推荐器实例
-    svdpp = Svdpp()
-    svdpp.load_data(path='../Data/ml-1m/')
-    svdpp.train()
 
-    # 获取推荐
     user_id = 1
-    all_recommendations = svdpp.top_n_recommendations(user_id)
-    # 只输出前五个结果
-    top_five_recommendations = all_recommendations.nlargest(5, 'predicted_rating')
-    print(f"SVDPP推荐的前五结果:")
-    for _, row in top_five_recommendations.iterrows():
-        print(f"用户编号：{user_id}，电影编号：{row['movieId']}，推荐电影：'{row['title']}'，预测用户可能评分：{row['predicted_rating']:.2f}")
 
-    recommender = MovieRecommender()
-    recommender.load_data(path='../Data/ml-1m/')
-    recommender.create_user_profile(user_id)
-    all_recommendations = recommender.get_top_n_recommendations(user_id)
+    # 创建推荐器实例
+    recommender_s = Svdpp()
+    recommender_s.load_data(path='../Data/ml-1m/')
+    recommender_s.train()
+    all_recommendations_s = recommender_s.get_recommendations(user_id)
     # 只输出前五个结果
-    top_five_recommendations = all_recommendations.nlargest(5, 'predicted_rating')
+    top_recommendations_s = all_recommendations_s.nlargest(5, 'predicted_rating')
+    print(f"SVDPP推荐的前五结果:")
+    for _, row in top_recommendations_s.iterrows():
+        print(
+            f"用户编号：{user_id}，电影编号：{row['movieId']}，推荐电影：'{row['title']}'，预测用户可能评分：{row['predicted_rating']:.2f}")
+
+    recommender_c = ContentBased()
+    recommender_c.load_data(path='../Data/ml-1m/')
+    recommender_c.create_user_profile(user_id)
+    all_recommendations_c = recommender_c.get_recommendations(user_id)
+    # 只输出前五个结果
+    top_recommendations = all_recommendations_c.nlargest(5, 'predicted_rating')
     print(f"CB推荐的前五结果:")
-    for _, row in top_five_recommendations.iterrows():
-        print(f"用户编号：{user_id}，电影编号：{row['movieId']}，推荐电影：'{row['title']}'，预测用户可能评分：{row['predicted_rating']:.2f}")
+    for _, row in top_recommendations.iterrows():
+        print(
+            f"用户编号：{user_id}，电影编号：{row['movieId']}，推荐电影：'{row['title']}'，预测用户可能评分：{row['predicted_rating']:.2f}")
 
     # 初始化一个加权融合推荐器的实例
     weight1 = 0.5
     weight2 = 0.5
-    hybrid_recommender = HybridRecommender(svdpp, recommender, weight1, weight2)
+    hybrid_recommender = HybridRecommender(recommender_s, recommender_c, weight1, weight2)
     # 使用加权融合推荐器预测
     hybrid_recommendations = hybrid_recommender.predict(user_id)
     # 打印预测评分
