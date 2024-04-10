@@ -102,7 +102,6 @@ class MovieRecommender:
     def generate_recommendations(self, user_id):
         user_profile = np.array(self.user_profile).reshape(1, -1)
         cosine_similarities = cosine_similarity(user_profile, self.tfidf_matrix)
-        similarities_scores = cosine_similarities.flatten()
         predicted_scores = cosine_similarities.flatten()
         recommendations_df = self.movies_df.copy()
         recommendations_df['predicted_rating'] = predicted_scores*5
@@ -129,6 +128,19 @@ class HybridRecommender:
         self.weight1 = weight1
         self.weight2 = weight2
 
+    # 定义一个正规化函数，将 z 分数转化为 0 到 5 的分数
+    def normalize_to_0_5(self, scores):
+        min_score = scores.min()
+        range_score = scores.max() - min_score
+
+        # 将所有的分数转换为 0-1
+        normalized_scores = (scores - min_score) / range_score
+
+        # 将所有的分数转换为 0-5
+        normalized_scores = normalized_scores * 5
+
+        return normalized_scores
+
     def predict(self, user_id):
         # 获取两个模型的推荐电影
         predictions1 = self.model1.get_top_n_recommendations(user_id)
@@ -141,11 +153,9 @@ class HybridRecommender:
         # 合并两个预测结果
         combined = pd.concat([predictions1, predictions2])
 
-        # 创建一个新列保存原始评分，用于后续正规化
+        # 正规化评分，转化为z分数并调整到0-5范围
+        combined['predicted_rating'] = self.normalize_to_0_5(combined.groupby('source')['predicted_rating'].transform(zscore))
         combined['original_rating'] = combined['predicted_rating']
-
-        # 正规化评分，转化为z分数
-        combined['predicted_rating'] = combined.groupby('source')['predicted_rating'].transform(zscore)
 
         # 计算有差异性的加权混合评分
         def adjust_rating(row):
@@ -187,24 +197,6 @@ class HybridRecommender:
         # 只返回前五部电影
         return final_recommendations_df.head(5)
 
-    def check_common_recommendations(self, user_id):
-        # 获取两个模型的推荐电影
-        predictions1 = self.model1.get_top_n_recommendations(user_id)
-        predictions2 = self.model2.get_top_n_recommendations(user_id)
-
-        # 计算共有的电影ID
-        common_movie_ids = set(predictions1['movieId']).intersection(set(predictions2['movieId']))
-
-        # 返回这些共有的电影的详细信息
-        common_movies = predictions1[predictions1['movieId'].isin(common_movie_ids)]
-
-        # 打印共有推荐的数量和标题
-        print(f"两个模型共同推荐的电影数量：{len(common_movies)}")
-        for _, row in common_movies.iterrows():
-            print(f"电影编号：{row['movieId']}，电影标题：'{row['title']}'")
-
-        # 返回共有推荐的详细信息
-        return common_movies
 
 if __name__ == "__main__":
     # 创建推荐器实例
@@ -231,12 +223,10 @@ if __name__ == "__main__":
     for _, row in top_five_recommendations.iterrows():
         print(f"用户编号：{user_id}，电影编号：{row['movieId']}，推荐电影：'{row['title']}'，预测用户可能评分：{row['predicted_rating']:.2f}")
 
-
     # 初始化一个加权融合推荐器的实例
     weight1 = 0.5
     weight2 = 0.5
     hybrid_recommender = HybridRecommender(svdpp, recommender, weight1, weight2)
-    # common_recommendations = hybrid_recommender.check_common_recommendations(user_id)
     # 使用加权融合推荐器预测
     hybrid_recommendations = hybrid_recommender.predict(user_id)
     # 打印预测评分
