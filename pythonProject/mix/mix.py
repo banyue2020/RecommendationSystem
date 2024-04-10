@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy.stats import zscore
 
 class Svdpp:
     def __init__(self, K=10, steps=3, gamma=0.04, lambda_=0.15):
@@ -107,7 +108,7 @@ class MovieRecommender:
         recommendations_df['predicted_rating'] = predicted_scores*5
         rated_movie_ids = self.ratings_df[self.ratings_df['userId'] == user_id]['movieId'].tolist()
         recommendations_df = recommendations_df[~recommendations_df['movieId'].isin(rated_movie_ids)]
-        self.top_n_recommendations_df = recommendations_df.nlargest(5, 'predicted_rating')
+        self.top_n_recommendations_df = recommendations_df
 
     def get_top_n_recommendations(self, user_id, n=None):
         # 默认参数n被设为None，不再限制返回的推荐数量
@@ -140,82 +141,70 @@ class HybridRecommender:
         # 合并两个预测结果
         combined = pd.concat([predictions1, predictions2])
 
+        # 创建一个新列保存原始评分，用于后续正规化
+        combined['original_rating'] = combined['predicted_rating']
 
-        # # 计算混合得分
-        # combined['hybrid_rating'] = (
-        #         self.weight1 * combined['predicted_rating'] +
-        #         self.weight2 * combined['predicted_rating']
-        # )
-        #
-        # # 找出只在一个表的电影
-        # unique_movies = combined.groupby('movieId').filter(lambda group: len(group) == 1)
-        #
-        # # 找出在两个表中都出现的电影
-        # intersect_movies = combined.groupby('movieId').filter(lambda group: len(group) > 1)
-        #
-        # # 对交集电影进行得分排序
-        # intersect_movies = intersect_movies.sort_values('hybrid_rating', ascending=False)
-        #
-        # # 先推荐交集电影，然后推荐单一表电影
-        # ordered_recommendations = pd.concat([intersect_movies, unique_movies])
-        #
-        # return ordered_recommendations[:5]
-        #
-        # # 将合并后的列表按照电影名字进行分组
-        # grouped = combined.groupby('title')
-        #
-        # # 创建一个空列表，用来保存混合后的结果
-        # hybrid_list = []
-        #
-        # # 对每个组进行混合操作
-        # for name, group in grouped:
-        #     # 根据来源获取每个模型的预测评分
-        #     pred1 = group[group['source'] == 'model1']['predicted_rating'].mean()
-        #     pred2 = group[group['source'] == 'model2']['predicted_rating'].mean()
-        #
-        #     # 计算混合评分
-        #     hybrid_rating = self.weight1 * pred1 + self.weight2 * pred2
-        #
-        #     # 添加到结果列表中
-        #     hybrid_list.append({
-        #         'title': name,
-        #         'movieId': group['movieId'].values[0],  # 添加这一行
-        #         'hybrid_rating': hybrid_rating
-        #     })
-        #
-        # # 创建一个新的DataFrame，从结果列表中
-        # hybrid_ratings = pd.DataFrame(hybrid_list)
-        #
-        # # 按照混合评分降序排序并返回前 5 部电影
-        # return hybrid_ratings.sort_values('hybrid_rating', ascending=False).head(5)
+        # 正规化评分，转化为z分数
+        combined['predicted_rating'] = combined.groupby('source')['predicted_rating'].transform(zscore)
 
-        # 为了处理数据，我们先创建一个标记列，用于标识每个电影的预测是来自单一模型还是两个模型都有
-        combined['is_unique'] = combined.groupby('movieId')['source'].transform('nunique') == 1
+        # 计算有差异性的加权混合评分
+        def adjust_rating(row):
+            if row['source'] == 'model1':
+                return self.weight1 * row['predicted_rating']
+            else:
+                return self.weight2 * row['predicted_rating']
 
-        # 计算混合得分，只对同时出现在两个模型中电影进行计算
-        combined['hybrid_rating'] = combined.apply(
-            lambda x: self.weight1 * x['predicted_rating'] + self.weight2 * x['predicted_rating']
-            if not x['is_unique'] else x['predicted_rating'],
-            axis=1
-        )
+        combined['adjusted_rating'] = combined.apply(adjust_rating, axis=1)
 
-        # 先处理在两个模型中都出现的电影
-        intersect_movies = combined[~combined['is_unique']].copy()
-        intersect_movies = intersect_movies.groupby('movieId').agg({
-            'title': 'first',  # 假设同一 movieId 的所有 title 都是相同的
-            'hybrid_rating': 'sum'  # 对同一个电影的混合评分进行求和
-        }).reset_index()
-        intersect_movies = intersect_movies.sort_values(by='hybrid_rating', ascending=False)
+        # 分组以得到重叠和独特的电影记录
+        grouped = combined.groupby('movieId')
 
-        # 然后处理只在一个模型中出现的电影
-        unique_movies = combined[combined['is_unique']].copy()
-        unique_movies = unique_movies.sort_values(by=['hybrid_rating', 'movieId'], ascending=[False, True])
+        # 遍历每个电影的组
+        final_recommendations = []
+        for movie_id, group in grouped:
+            # 获取电影的标题
+            title = group['title'].iloc[0]
 
-        # 将交集电影和单一表电影按顺序合并
-        final_recommendations = pd.concat([intersect_movies, unique_movies])
+            # 如果电影来自两个模型
+            if len(group) > 1:
+                # 取平均值作为混合评分
+                hybrid_rating = group['adjusted_rating'].mean()
+            else:
+                # 取单个模型的评分，并降低它的权重
+                hybrid_rating = group['adjusted_rating'].iloc[0] * 0.7
 
-        # 我们只返回合并列表中的前5部电影
-        return final_recommendations.head(5)
+            final_recommendations.append({
+                'movieId': movie_id,
+                'title': title,
+                'hybrid_rating': hybrid_rating,
+                'original_ratings': group['original_rating'].tolist()  # 保存原始评分以供参考
+            })
+
+        # 将推荐转换为DataFrame并排序
+        final_recommendations_df = pd.DataFrame(final_recommendations)
+        final_recommendations_df = final_recommendations_df.sort_values(by='hybrid_rating', ascending=False)
+
+        # 只返回前五部电影
+        return final_recommendations_df.head(5)
+
+    def check_common_recommendations(self, user_id):
+        # 获取两个模型的推荐电影
+        predictions1 = self.model1.get_top_n_recommendations(user_id)
+        predictions2 = self.model2.get_top_n_recommendations(user_id)
+
+        # 计算共有的电影ID
+        common_movie_ids = set(predictions1['movieId']).intersection(set(predictions2['movieId']))
+
+        # 返回这些共有的电影的详细信息
+        common_movies = predictions1[predictions1['movieId'].isin(common_movie_ids)]
+
+        # 打印共有推荐的数量和标题
+        print(f"两个模型共同推荐的电影数量：{len(common_movies)}")
+        for _, row in common_movies.iterrows():
+            print(f"电影编号：{row['movieId']}，电影标题：'{row['title']}'")
+
+        # 返回共有推荐的详细信息
+        return common_movies
 
 if __name__ == "__main__":
     # 创建推荐器实例
@@ -223,17 +212,14 @@ if __name__ == "__main__":
     svdpp.load_data(path='../Data/ml-1m/')
     svdpp.train()
 
-
     # 获取推荐
     user_id = 1
-    # top_n_movies = svdpp.top_n_recommendations(user_id, n=5)
     all_recommendations = svdpp.top_n_recommendations(user_id)
     # 只输出前五个结果
     top_five_recommendations = all_recommendations.nlargest(5, 'predicted_rating')
     print(f"SVDPP推荐的前五结果:")
     for _, row in top_five_recommendations.iterrows():
         print(f"用户编号：{user_id}，电影编号：{row['movieId']}，推荐电影：'{row['title']}'，预测用户可能评分：{row['predicted_rating']:.2f}")
-
 
     recommender = MovieRecommender()
     recommender.load_data(path='../Data/ml-1m/')
@@ -247,9 +233,10 @@ if __name__ == "__main__":
 
 
     # 初始化一个加权融合推荐器的实例
-    weight1 = 0.8
-    weight2 = 0.2
+    weight1 = 0.5
+    weight2 = 0.5
     hybrid_recommender = HybridRecommender(svdpp, recommender, weight1, weight2)
+    # common_recommendations = hybrid_recommender.check_common_recommendations(user_id)
     # 使用加权融合推荐器预测
     hybrid_recommendations = hybrid_recommender.predict(user_id)
     # 打印预测评分
